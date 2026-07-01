@@ -1,0 +1,57 @@
+{
+  "SubscriptionId": "fde75121-ada1-47c1-804b-bad0e6e71d40",
+  "Location": "centralindia",
+
+  "ImageResourceGroup": "AVD-POC-rg",
+  "GalleryName": "GoldenVM",
+  "ImageDefinitionName": "Image01",
+
+
+  "BuildResourceGroup": "rg-avd-imagebuild-weu",
+  "GoldenVmNamePrefix": "golden-avd",
+  "GoldenVmNameSuffixFormat": "yyyyMMdd-HHmmss",
+  "DeleteGoldenVmAfterCapture": true,
+  "EnableBootDiagnostics": false,
+
+  "WindowsUpdateMaxRounds": 2,
+  "WindowsUpdateWaitMinutesAfterReboot": 20,
+  "FslogixPackageUrl": "https://aka.ms/fslogix_download",
+  "FslogixInstallerName": "FSLogixAppsSetup.exe",
+  "WindowsUpdateScanTimeoutMinutes": 45,
+  "WindowsUpdateInstallTimeoutMinutes": 90,
+  "WindowsUpdateLimit": 25,
+
+  "AvdResourceGroup": "AVD-POC-rg",
+  "HostPoolName": "hp-poc",
+
+  "SessionHostResourceGroup": "AVD-POC-rg",
+  "VmNamePrefix": "avdweuprod",
+  "VmSize": "Standard_D4s_v5",
+  "NewHostCount": 1,
+  "AvdRegistrationTokenHours": 8,
+  "SecurityType": "Standard",
+  "EnableSecureBoot": false,
+  "EnableVtpm": false,
+
+
+  "VnetResourceGroup": "AVD-POC-rg",
+  "VnetName": "avd-poc-vnet",
+  "SubnetName": "avd-snet",
+
+  "KeyVaultName": "aks-keyvaut1",
+
+  "LocalAdminUsernameSecret": "LocalAdminUsername",
+  "LocalAdminPasswordSecret": "LocalAdminPassword",
+
+  "DomainName": "corps.com",
+  "DomainJoinUsernameSecret": "DomainJoinUsername",
+  "DomainJoinPasswordSecret": "DomainJoinPassword",
+  "DomainJoinOUPath": "OU=AVD,DC=corps,DC=com",
+
+  "DeleteOldHostsAfterHours": 24,
+  "CleanupEntraDevice": true,
+
+  "NotifyEmail": "Saqlin.Mushtaq@insight.com",
+  "NotifyFrom": "",
+  "SmtpServer": ""
+}

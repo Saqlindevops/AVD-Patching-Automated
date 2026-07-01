@@ -1,0 +1,80 @@
+# ============================================================================
+#  DEPRECATED - manual pipeline, superseded by avd-patching-scheduled.yml
+#  Kept only as a manual fallback while the automated pipeline is validated.
+#  Retire (delete) this file once the scheduled run is proven in non-prod.
+# ============================================================================
+trigger: none
+
+pool:
+  name: Selfhosted
+
+parameters:
+- name: imageVersion
+  displayName: New image version to deploy (leave blank to auto-use latest gallery version)
+  type: string
+  default: ''
+
+variables:
+  azureServiceConnection: 'sc-avd-prod1'
+  configPath: 'config/avd-prod-weu.json'
+
+stages:
+- stage: DeployNewHosts
+  displayName: Phase 3 - Deploy new hosts
+  jobs:
+  - job: Deploy
+    displayName: Deploy new AVD hosts
+    steps:
+    - checkout: self
+
+    - task: PowerShell@2
+      displayName: Read KeyVaultName from config
+      inputs:
+        targetType: inline
+        script: |
+          $config = Get-Content "$(configPath)" | ConvertFrom-Json
+          if (-not $config.KeyVaultName) {
+              throw "KeyVaultName is missing from $(configPath)."
+          }
+          Write-Host "##vso[task.setvariable variable=keyVaultName]$($config.KeyVaultName)"
+
+    - task: AzureKeyVault@2
+      displayName: Fetch secrets
+      inputs:
+        azureSubscription: $(azureServiceConnection)
+        KeyVaultName: $(keyVaultName)
+        SecretsFilter: 'LocalAdminUsername,LocalAdminPassword,DomainJoinUsername,DomainJoinPassword'
+        RunAsPreJob: false
+
+    - task: AzurePowerShell@5
+      displayName: Deploy new AVD session host VMs
+      inputs:
+        azureSubscription: $(azureServiceConnection)
+        ScriptType: FilePath
+        ScriptPath: scripts/04-deploy-new-avd-hosts.ps1
+        ScriptArguments: >
+          -ConfigPath "$(configPath)"
+          -ImageVersion "${{ parameters.imageVersion }}"
+        azurePowerShellVersion: LatestVersion
+      env:
+        LocalAdminUsername: $(LocalAdminUsername)
+        LocalAdminPassword: $(LocalAdminPassword)
+        DomainJoinUsername: $(DomainJoinUsername)
+        DomainJoinPassword: $(DomainJoinPassword)
+
+  - job: DrainOldHosts
+    displayName: Drain old hosts
+    dependsOn: Deploy
+    steps:
+    - checkout: self
+
+    - task: AzurePowerShell@5
+      displayName: Put old hosts in drain mode
+      inputs:
+        azureSubscription: $(azureServiceConnection)
+        ScriptType: FilePath
+        ScriptPath: scripts/05-drain-old-hosts.ps1
+        ScriptArguments: >
+          -ConfigPath "$(configPath)"
+          -NewImageVersion "${{ parameters.imageVersion }}"
+        azurePowerShellVersion: LatestVersion

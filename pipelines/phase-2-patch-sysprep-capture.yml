@@ -1,0 +1,78 @@
+# ============================================================================
+#  DEPRECATED - manual pipeline, superseded by avd-patching-scheduled.yml
+#  Kept only as a manual fallback while the automated pipeline is validated.
+#  Retire (delete) this file once the scheduled run is proven in non-prod.
+#  NOTE: the previously hard-coded Key Vault name has been removed - this
+#  phase does not use Key Vault. The vault name now comes only from config.
+# ============================================================================
+trigger: none
+
+pool:
+  name: Selfhosted
+
+parameters:
+- name: goldenVmName
+  displayName: Golden VM name
+  type: string
+
+- name: imageVersion
+  displayName: New image version, example 2026.06.13
+  type: string
+
+variables:
+  azureServiceConnection: 'sc-avd-prod1'
+  configPath: 'config/avd-prod-weu.json'
+
+stages:
+- stage: PatchSysprepCapture
+  displayName: Phase 2 - Patch, Sysprep, Capture
+  jobs:
+
+  # ------------------------------------------------------------
+  # Job 1: Patch Windows OS and update FSLogix
+  # Timeout set to 120 minutes
+  # ------------------------------------------------------------
+  - job: PatchGoldenVM
+    displayName: Patch golden VM
+    timeoutInMinutes: 120
+
+    steps:
+    - checkout: self
+
+    - task: AzurePowerShell@5
+      displayName: Patch OS and update FSLogix
+      timeoutInMinutes: 120
+      inputs:
+        azureSubscription: $(azureServiceConnection)
+        ScriptType: FilePath
+        ScriptPath: scripts/02-update-golden-vm.ps1
+        ScriptArguments: >
+          -ConfigPath "$(configPath)"
+          -GoldenVmName "${{ parameters.goldenVmName }}"
+        azurePowerShellVersion: LatestVersion
+
+  # ------------------------------------------------------------
+  # Job 2: Sysprep and capture image version
+  # This runs only after patching succeeds
+  # ------------------------------------------------------------
+  - job: SysprepCapture
+    displayName: Sysprep and capture image
+    dependsOn: PatchGoldenVM
+    condition: succeeded()
+    timeoutInMinutes: 180
+
+    steps:
+    - checkout: self
+
+    - task: AzurePowerShell@5
+      displayName: Sysprep and create new image version
+      timeoutInMinutes: 180
+      inputs:
+        azureSubscription: $(azureServiceConnection)
+        ScriptType: FilePath
+        ScriptPath: scripts/03-sysprep-capture-image.ps1
+        ScriptArguments: >
+          -ConfigPath "$(configPath)"
+          -GoldenVmName "${{ parameters.goldenVmName }}"
+          -ImageVersion "${{ parameters.imageVersion }}"
+        azurePowerShellVersion: LatestVersion

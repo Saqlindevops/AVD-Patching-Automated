@@ -1,0 +1,316 @@
+# ============================================================================
+#  AVD Golden-Image Patching - FULLY AUTOMATED, SCHEDULED PIPELINE
+# ----------------------------------------------------------------------------
+#  This single pipeline replaces the manual phase-1, phase-2 and phase-3
+#  pipelines. It runs end-to-end with no human intervention:
+#
+#     Stage 1  Validate  ....  pre-flight checks + generate image version
+#     Stage 2  Create    ....  script 01  (create golden VM)
+#     Stage 3  Patch     ....  scripts 02 + 03  (patch, sysprep, capture image)
+#     Stage 4  Deploy    ....  scripts 04 + 05  (deploy new hosts, drain old)
+#     Stage 5  Notify    ....  runs ONLY on failure (cleanup + email alert)
+#
+#  Phase 4 (cleanup of drained hosts) stays as its own daily schedule
+#  (phase-4-cleanup-old-hosts.yml) and is intentionally NOT part of this run.
+#
+#  SCHEDULE: third Saturday of each month, 22:00 IST.
+#  Azure DevOps cron runs in UTC and cannot express "third Saturday" directly,
+#  so we fire every Saturday at 16:30 UTC (= 22:00 IST) and use a guard step
+#  that only lets the run continue when the date is 15-21 (always the 3rd Sat).
+# ============================================================================
+
+trigger: none          # never start on a code push
+pr: none               # never start on a pull request
+
+schedules:
+- cron: "30 16 * * 6"                       # every Saturday 16:30 UTC = 22:00 IST Sat
+  displayName: Monthly AVD patch (3rd Saturday 22:00 IST)
+  branches:
+    include:
+    - main
+  always: true                             # run regardless of code changes
+
+pool:
+  name: Selfhosted
+
+variables:
+  azureServiceConnection: 'sc-avd-prod1'
+  configPath: 'config/avd-prod-weu.json'
+
+stages:
+
+# ============================================================================
+# STAGE 1 - Validate the environment and initialise the run
+# ============================================================================
+- stage: Validate
+  displayName: Stage 1 - Validate and initialise
+  jobs:
+  - job: Validate
+    displayName: Guard, image version and pre-flight checks
+    steps:
+    - checkout: self
+
+    # --- Guard: only proceed on the THIRD Saturday (date 15-21). ------------
+    - task: PowerShell@2
+      name: guard
+      displayName: Confirm this is the third Saturday
+      inputs:
+        targetType: inline
+        script: |
+          $now = Get-Date
+          $isThirdSaturday = ($now.DayOfWeek -eq 'Saturday') -and ($now.Day -ge 15) -and ($now.Day -le 21)
+
+          if ($isThirdSaturday) {
+              Write-Host "Third Saturday confirmed ($($now.ToString('yyyy-MM-dd dddd'))). Continuing."
+              Write-Host "##vso[task.setvariable variable=proceed;isOutput=true]true"
+          }
+          else {
+              Write-Host "Today is $($now.ToString('yyyy-MM-dd dddd')) - not the third Saturday. Skipping this run."
+              Write-Host "##vso[task.setvariable variable=proceed;isOutput=true]false"
+          }
+
+    # --- Generate a unique, sortable image version from the date/time. ------
+    - task: PowerShell@2
+      name: init
+      displayName: Generate image version
+      condition: eq(variables['guard.proceed'], 'true')
+      inputs:
+        targetType: inline
+        script: |
+          $now    = Get-Date
+          $minor  = [int]($now.ToString('MMdd'))    # e.g. 0719 -> 719
+          $patch  = [int]($now.ToString('HHmm'))    # e.g. 2200 -> 2200
+          $imageVersion = "$($now.Year).$minor.$patch"
+          Write-Host "Generated image version: $imageVersion"
+          Write-Host "##vso[task.setvariable variable=imageVersion;isOutput=true]$imageVersion"
+
+    # --- Pre-flight: fail fast if config or environment is not ready. -------
+    - task: AzurePowerShell@5
+      displayName: Validate configuration and environment
+      condition: eq(variables['guard.proceed'], 'true')
+      inputs:
+        azureSubscription: $(azureServiceConnection)
+        ScriptType: FilePath
+        ScriptPath: scripts/00-validate-environment.ps1
+        ScriptArguments: >
+          -ConfigPath "$(configPath)"
+        azurePowerShellVersion: LatestVersion
+
+# ============================================================================
+# STAGE 2 - Create the golden VM  (script 01)
+# ============================================================================
+- stage: CreateGolden
+  displayName: Stage 2 - Create golden VM
+  dependsOn: Validate
+  condition: and(succeeded(), eq(dependencies.Validate.outputs['Validate.guard.proceed'], 'true'))
+  jobs:
+  - job: CreateVM
+    displayName: Create temporary golden VM
+    steps:
+    - checkout: self
+
+    # Read the Key Vault name FROM CONFIG (single source of truth).
+    - task: PowerShell@2
+      displayName: Read KeyVaultName from config
+      inputs:
+        targetType: inline
+        script: |
+          $config = Get-Content "$(configPath)" | ConvertFrom-Json
+          if (-not $config.KeyVaultName) {
+              throw "KeyVaultName is missing from $(configPath)."
+          }
+          Write-Host "##vso[task.setvariable variable=keyVaultName]$($config.KeyVaultName)"
+
+    - task: AzureKeyVault@2
+      displayName: Fetch secrets from Key Vault
+      inputs:
+        azureSubscription: $(azureServiceConnection)
+        KeyVaultName: $(keyVaultName)
+        SecretsFilter: 'LocalAdminUsername,LocalAdminPassword'
+        RunAsPreJob: false
+
+    - task: AzurePowerShell@5
+      name: createGolden
+      displayName: Create golden VM from latest image
+      inputs:
+        azureSubscription: $(azureServiceConnection)
+        ScriptType: FilePath
+        ScriptPath: scripts/01-create-golden-vm.ps1
+        ScriptArguments: >
+          -ConfigPath "$(configPath)"
+        azurePowerShellVersion: LatestVersion
+      env:
+        LocalAdminUsername: $(LocalAdminUsername)
+        LocalAdminPassword: $(LocalAdminPassword)
+
+# ============================================================================
+# STAGE 3 - Patch, Sysprep and capture the image  (scripts 02 + 03)
+# ============================================================================
+- stage: PatchCapture
+  displayName: Stage 3 - Patch, Sysprep, Capture
+  dependsOn:
+  - Validate
+  - CreateGolden
+  condition: and(succeeded(), eq(dependencies.Validate.outputs['Validate.guard.proceed'], 'true'))
+  jobs:
+
+  - job: PatchGoldenVM
+    displayName: Patch golden VM
+    timeoutInMinutes: 120
+    variables:
+      goldenVmName: $[ stageDependencies.CreateGolden.CreateVM.outputs['createGolden.GoldenVmName'] ]
+    steps:
+    - checkout: self
+    - task: AzurePowerShell@5
+      displayName: Patch OS and update FSLogix
+      timeoutInMinutes: 120
+      inputs:
+        azureSubscription: $(azureServiceConnection)
+        ScriptType: FilePath
+        ScriptPath: scripts/02-update-golden-vm.ps1
+        ScriptArguments: >
+          -ConfigPath "$(configPath)"
+          -GoldenVmName "$(goldenVmName)"
+        azurePowerShellVersion: LatestVersion
+
+  - job: SysprepCapture
+    displayName: Sysprep and capture image
+    dependsOn: PatchGoldenVM
+    condition: succeeded()
+    timeoutInMinutes: 180
+    variables:
+      goldenVmName: $[ stageDependencies.CreateGolden.CreateVM.outputs['createGolden.GoldenVmName'] ]
+      imageVersion: $[ stageDependencies.Validate.Validate.outputs['init.imageVersion'] ]
+    steps:
+    - checkout: self
+    - task: AzurePowerShell@5
+      displayName: Sysprep and create new image version
+      timeoutInMinutes: 180
+      inputs:
+        azureSubscription: $(azureServiceConnection)
+        ScriptType: FilePath
+        ScriptPath: scripts/03-sysprep-capture-image.ps1
+        ScriptArguments: >
+          -ConfigPath "$(configPath)"
+          -GoldenVmName "$(goldenVmName)"
+          -ImageVersion "$(imageVersion)"
+        azurePowerShellVersion: LatestVersion
+
+# ============================================================================
+# STAGE 4 - Deploy new hosts and drain the old ones  (scripts 04 + 05)
+# ============================================================================
+- stage: DeployDrain
+  displayName: Stage 4 - Deploy new hosts and drain old
+  dependsOn:
+  - Validate
+  - PatchCapture
+  condition: and(succeeded(), eq(dependencies.Validate.outputs['Validate.guard.proceed'], 'true'))
+  jobs:
+
+  - job: Deploy
+    displayName: Deploy new AVD hosts
+    variables:
+      imageVersion: $[ stageDependencies.Validate.Validate.outputs['init.imageVersion'] ]
+    steps:
+    - checkout: self
+
+    # Read the Key Vault name FROM CONFIG (single source of truth).
+    - task: PowerShell@2
+      displayName: Read KeyVaultName from config
+      inputs:
+        targetType: inline
+        script: |
+          $config = Get-Content "$(configPath)" | ConvertFrom-Json
+          if (-not $config.KeyVaultName) {
+              throw "KeyVaultName is missing from $(configPath)."
+          }
+          Write-Host "##vso[task.setvariable variable=keyVaultName]$($config.KeyVaultName)"
+
+    - task: AzureKeyVault@2
+      displayName: Fetch secrets from Key Vault
+      inputs:
+        azureSubscription: $(azureServiceConnection)
+        KeyVaultName: $(keyVaultName)
+        SecretsFilter: 'LocalAdminUsername,LocalAdminPassword,DomainJoinUsername,DomainJoinPassword'
+        RunAsPreJob: false
+
+    - task: AzurePowerShell@5
+      displayName: Deploy new AVD session host VMs
+      inputs:
+        azureSubscription: $(azureServiceConnection)
+        ScriptType: FilePath
+        ScriptPath: scripts/04-deploy-new-avd-hosts.ps1
+        ScriptArguments: >
+          -ConfigPath "$(configPath)"
+          -ImageVersion "$(imageVersion)"
+        azurePowerShellVersion: LatestVersion
+      env:
+        LocalAdminUsername: $(LocalAdminUsername)
+        LocalAdminPassword: $(LocalAdminPassword)
+        DomainJoinUsername: $(DomainJoinUsername)
+        DomainJoinPassword: $(DomainJoinPassword)
+
+  - job: DrainOldHosts
+    displayName: Drain old hosts
+    dependsOn: Deploy
+    condition: succeeded()
+    variables:
+      imageVersion: $[ stageDependencies.Validate.Validate.outputs['init.imageVersion'] ]
+    steps:
+    - checkout: self
+    - task: AzurePowerShell@5
+      displayName: Put old hosts in drain mode
+      inputs:
+        azureSubscription: $(azureServiceConnection)
+        ScriptType: FilePath
+        ScriptPath: scripts/05-drain-old-hosts.ps1
+        ScriptArguments: >
+          -ConfigPath "$(configPath)"
+          -NewImageVersion "$(imageVersion)"
+        azurePowerShellVersion: LatestVersion
+
+# ============================================================================
+# STAGE 5 - Runs ONLY if something above failed: clean up + email alert
+# ============================================================================
+- stage: NotifyOnFailure
+  displayName: Stage 5 - On failure (cleanup + alert)
+  dependsOn:
+  - Validate
+  - CreateGolden
+  - PatchCapture
+  - DeployDrain
+  condition: failed()
+  jobs:
+  - job: HandleFailure
+    displayName: Clean up orphaned golden VM and send alert
+    variables:
+      goldenVmName: $[ stageDependencies.CreateGolden.CreateVM.outputs['createGolden.GoldenVmName'] ]
+    steps:
+    - checkout: self
+
+    # Remove the temporary golden VM if the run failed after it was created.
+    - task: AzurePowerShell@5
+      displayName: Clean up orphaned golden VM
+      condition: always()
+      inputs:
+        azureSubscription: $(azureServiceConnection)
+        ScriptType: FilePath
+        ScriptPath: scripts/07-cleanup-failed-run.ps1
+        ScriptArguments: >
+          -ConfigPath "$(configPath)"
+          -GoldenVmName "$(goldenVmName)"
+        azurePowerShellVersion: LatestVersion
+
+    # Best-effort email alert (see README for the recommended built-in option).
+    - task: AzurePowerShell@5
+      displayName: Send failure email
+      condition: always()
+      inputs:
+        azureSubscription: $(azureServiceConnection)
+        ScriptType: FilePath
+        ScriptPath: scripts/08-notify-failure.ps1
+        ScriptArguments: >
+          -ConfigPath "$(configPath)"
+          -PipelineName "$(Build.DefinitionName)"
+          -RunUrl "$(System.CollectionUri)$(System.TeamProject)/_build/results?buildId=$(Build.BuildId)"
+        azurePowerShellVersion: LatestVersion

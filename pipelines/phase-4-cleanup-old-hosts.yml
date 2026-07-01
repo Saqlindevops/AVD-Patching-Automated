@@ -1,0 +1,35 @@
+trigger: none
+
+schedules:
+- cron: "0 2 * * *"
+  displayName: Daily old AVD host cleanup
+  branches:
+    include:
+    - main
+  always: true
+
+pool:
+  name: Selfhosted
+
+variables:
+  azureServiceConnection: 'sc-avd-prod1'
+  configPath: 'config/avd-prod-weu.json'
+
+stages:
+- stage: CleanupOldHosts
+  displayName: Phase 4 - Cleanup old drained hosts
+  jobs:
+  - job: Cleanup
+    displayName: Delete old hosts after RetireAfter time
+    steps:
+    - checkout: self
+
+    - task: AzurePowerShell@5
+      displayName: Cleanup old AVD hosts
+      inputs:
+        azureSubscription: $(azureServiceConnection)
+        ScriptType: FilePath
+        ScriptPath: scripts/06-cleanup-old-hosts.ps1
+        ScriptArguments: >
+          -ConfigPath "$(configPath)"
+        azurePowerShellVersion: LatestVersion
