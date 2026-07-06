@@ -19,6 +19,15 @@
 #  that only lets the run continue when the date is 15-21 (always the 3rd Sat).
 # ============================================================================
 
+parameters:
+# Set to true when you MANUALLY run the pipeline to test it on a day that is not
+# the third Saturday. Scheduled runs always use the default (false), so the normal
+# third-Saturday guard still applies automatically.
+- name: forceRun
+  displayName: Force run now (skip the third-Saturday check) - for manual testing
+  type: boolean
+  default: false
+
 trigger: none          # never start on a code push
 pr: none               # never start on a pull request
 
@@ -57,15 +66,20 @@ stages:
       inputs:
         targetType: inline
         script: |
+          $forceRun = [System.Convert]::ToBoolean("${{ parameters.forceRun }}")
           $now = Get-Date
           $isThirdSaturday = ($now.DayOfWeek -eq 'Saturday') -and ($now.Day -ge 15) -and ($now.Day -le 21)
 
-          if ($isThirdSaturday) {
+          if ($forceRun) {
+              Write-Host "forceRun = true. Bypassing the third-Saturday check (manual test run)."
+              Write-Host "##vso[task.setvariable variable=proceed;isOutput=true]true"
+          }
+          elseif ($isThirdSaturday) {
               Write-Host "Third Saturday confirmed ($($now.ToString('yyyy-MM-dd dddd'))). Continuing."
               Write-Host "##vso[task.setvariable variable=proceed;isOutput=true]true"
           }
           else {
-              Write-Host "Today is $($now.ToString('yyyy-MM-dd dddd')) - not the third Saturday. Skipping this run."
+              Write-Host "Today is $($now.ToString('yyyy-MM-dd dddd')) - not the third Saturday and forceRun is off. Skipping."
               Write-Host "##vso[task.setvariable variable=proceed;isOutput=true]false"
           }
 
@@ -77,10 +91,13 @@ stages:
       inputs:
         targetType: inline
         script: |
+          # Image version format: YYYY.MM.DDHHMM (year . month . day+hour+minute).
+          # Azure gallery version parts are plain integers, so there are NO leading
+          # zeros: e.g. 01 Jul 14:24 -> 2026.7.11424 ; 15 Dec 23:59 -> 2026.12.152359.
           $now    = Get-Date
-          $minor  = [int]($now.ToString('MMdd'))    # e.g. 0719 -> 719
-          $patch  = [int]($now.ToString('HHmm'))    # e.g. 2200 -> 2200
-          $imageVersion = "$($now.Year).$minor.$patch"
+          $month  = $now.Month                       # 1-12
+          $patch  = [int]$now.ToString('ddHHmm')     # day+hour+minute, 011424 -> 11424
+          $imageVersion = "$($now.Year).$month.$patch"
           Write-Host "Generated image version: $imageVersion"
           Write-Host "##vso[task.setvariable variable=imageVersion;isOutput=true]$imageVersion"
 
