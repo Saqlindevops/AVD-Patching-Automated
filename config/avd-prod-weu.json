@@ -1,5 +1,5 @@
 {
-  "SubscriptionId": "fde75121-ada1-47c1-804b-bad0e6e71d40",
+  "SubscriptionId": "",
   "Location": "centralindia",
 
   "ImageResourceGroup": "AVD-POC-rg",
@@ -51,7 +51,7 @@
   "DeleteOldHostsAfterHours": 24,
   "CleanupEntraDevice": true,
 
-  "NotifyEmail": "Saqlin.Mushtaq@insight.com",
+  "NotifyEmail": ",
   "NotifyFrom": "",
   "SmtpServer": ""
 }
